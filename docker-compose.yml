@@ -1,0 +1,103 @@
+services:
+  # ─── Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: et-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - et-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── FastAPI Backend ───────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: et-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite+aiosqlite:///./data/et_intelligence.db
+      - APP_ENV=production
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - et-data:/app/data
+      - et-videos:/tmp/videos
+    restart: unless-stopped
+    networks:
+      - et-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ─── Celery Worker ────────────────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: et-celery-worker
+    command: celery -A backend.tasks.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite+aiosqlite:///./data/et_intelligence.db
+    depends_on:
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    volumes:
+      - et-data:/app/data
+      - et-videos:/tmp/videos
+    restart: unless-stopped
+    networks:
+      - et-network
+
+  # ─── Celery Beat Scheduler ────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: et-celery-beat
+    command: celery -A backend.tasks.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite+aiosqlite:///./data/et_intelligence.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - et-data:/app/data
+    restart: unless-stopped
+    networks:
+      - et-network
+
+# ─── Networks & Volumes ────────────────────────────────────────────────────
+networks:
+  et-network:
+    driver: bridge
+
+volumes:
+  et-data:
+    driver: local
+  et-videos:
+    driver: local
