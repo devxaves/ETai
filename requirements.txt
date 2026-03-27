@@ -1,0 +1,63 @@
+# === Web Framework ===
+fastapi==0.111.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+
+# === Database ===
+sqlalchemy==2.0.30
+aiosqlite==0.20.0
+
+# === Task Queue ===
+celery[redis]==5.3.6
+redis==5.0.4
+
+# === LLM Providers ===
+anthropic==0.26.0
+google-generativeai==0.5.4
+groq==0.8.0
+
+# === Financial Data ===
+yfinance==0.2.38
+pandas==2.2.1
+numpy==1.26.4
+
+# TA-Lib must be installed separately — see README
+# pip install TA-Lib (requires C library)
+
+# === ML / Embeddings ===
+transformers==4.40.0
+sentence-transformers==2.7.0
+chromadb==0.5.0
+torch==2.2.2
+tokenizers==0.19.1
+
+# === PDF / Web Scraping ===
+pdfplumber==0.11.0
+requests==2.31.0
+beautifulsoup4==4.12.3
+httpx==0.27.0
+lxml==5.2.1
+
+# === Config / Validation ===
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+
+# === Logging ===
+structlog==24.1.0
+
+# === Backtesting ===
+backtrader==1.9.78.123
+matplotlib==3.8.4
+
+# === Video Engine ===
+moviepy==1.0.3
+gTTS==2.5.1
+
+# === Architecture Doc Generator ===
+reportlab==4.1.0
+
+# === Development / Testing ===
+pytest==8.2.0
+pytest-asyncio==0.23.6
+httpx==0.27.0
