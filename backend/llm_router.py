@@ -21,7 +21,7 @@ class LLMRouter:
     def __init__(self):
         """Initialize the router — lazy loads clients on first use."""
         self._anthropic_client = None
-        self._gemini_configured = False
+        self._gemini_client = None
         self._groq_client = None
 
     # ------------------------------------------------------------------ #
@@ -146,29 +146,37 @@ class LLMRouter:
                 yield text
 
     async def _call_gemini(self, prompt: str, system: str, max_tokens: int) -> str:
-        """Call Google Gemini API."""
+        """Call Google Gemini API using the new genai.Client() interface."""
         from backend.config import settings, GEMINI_MODEL
 
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY not configured")
 
-        import google.generativeai as genai
+        from google import genai
 
-        if not self._gemini_configured:
-            genai.configure(api_key=settings.gemini_api_key)
-            self._gemini_configured = True
+        # Initialize client (lazy - only when first needed)
+        if not hasattr(self, '_gemini_client'):
+            self._gemini_client = genai.Client(api_key=settings.gemini_api_key)
 
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system if system else None,
-        )
+        # Build message with system prompt if provided
+        messages = []
+        if system:
+            messages.append({"role": "user", "content": system})
+            messages.append({"role": "model", "content": "Understood."})
 
-        full_prompt = prompt
+        messages.append({"role": "user", "content": prompt})
+
+        # Call Gemini model
         response = await asyncio.to_thread(
-            model.generate_content,
-            full_prompt,
-            generation_config={"max_output_tokens": max_tokens},
+            self._gemini_client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=messages,
+            config={
+                "max_output_tokens": max_tokens,
+                "temperature": 0.7,
+            }
         )
+
         return response.text
 
     async def _call_groq(self, prompt: str, system: str, max_tokens: int) -> str:
