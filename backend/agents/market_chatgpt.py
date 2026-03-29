@@ -198,7 +198,12 @@ Statement text:
     async def chat(self, session_id: str, user_message: str, conversation_history: List[dict], portfolio=None) -> str:
         """Portfolio-aware RAG chat."""
         from backend.data.embeddings import retrieve_portfolio_context
-        context_docs = await retrieve_portfolio_context(session_id, user_message, n_results=5)
+        try:
+            context_docs = await retrieve_portfolio_context(session_id, user_message, n_results=5)
+        except Exception as e:
+            logger.warning("Context retrieval failed, continuing without RAG context", error=str(e))
+            context_docs = []
+
         context_text = "\n".join(context_docs)
         portfolio_summary = portfolio.to_summary_text() if portfolio else context_text[:800]
 
@@ -214,18 +219,36 @@ Rules: Always refer to actual holdings. Never guarantee returns. Use ₹. Be spe
             return await llm_router.complete(prompt, system=system, max_tokens=500)
         except Exception as e:
             logger.error("Chat failed", error=str(e))
-            return "I encountered an issue. Please try again."
+            if portfolio and portfolio.holdings:
+                top_holding = max(portfolio.holdings, key=lambda h: h.current_value)
+                return (
+                    f"I could not reach the live AI model, but here is a fallback summary: "
+                    f"Your portfolio has {len(portfolio.holdings)} holdings with total value "
+                    f"₹{portfolio.total_value:,.0f}. Your largest holding is {top_holding.fund_name} "
+                    f"at ₹{top_holding.current_value:,.0f}. Consider reducing concentration risk and "
+                    f"adding diversification across categories."
+                )
+            return "I could not reach the live AI model. Please try again in a moment."
 
     async def stream_chat(self, session_id, user_message, conversation_history, portfolio=None):
         """Streaming portfolio chat."""
         from backend.data.embeddings import retrieve_portfolio_context
-        context_docs = await retrieve_portfolio_context(session_id, user_message, n_results=5)
+        try:
+            context_docs = await retrieve_portfolio_context(session_id, user_message, n_results=5)
+        except Exception as e:
+            logger.warning("Streaming context retrieval failed", error=str(e))
+            context_docs = []
+
         portfolio_summary = portfolio.to_summary_text() if portfolio else "\n".join(context_docs)[:800]
         system = f"Expert Indian financial advisor. Portfolio:\n{portfolio_summary}\nBe specific to holdings. Under 250 words."
         history = "".join(f"{m.get('role','user').title()}: {m.get('content','')}\n" for m in conversation_history[-4:])
         prompt = f"{history}User: {user_message}\nAssistant:"
-        async for chunk in llm_router.stream(prompt, system=system, max_tokens=500):
-            yield chunk
+        try:
+            async for chunk in llm_router.stream(prompt, system=system, max_tokens=500):
+                yield chunk
+        except Exception as e:
+            logger.error("Streaming chat failed", error=str(e))
+            yield "I could not reach the live AI model. Please try again in a moment."
 
     async def analyze_portfolio_health(self, portfolio: Portfolio) -> dict:
         """Full portfolio health analysis with LLM suggestions."""

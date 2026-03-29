@@ -4,9 +4,10 @@ routers/video.py — Video generation endpoints: generate, status, download, scr
 
 import os
 import uuid
+import asyncio
 from datetime import date, datetime
 import structlog
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,9 @@ router = APIRouter(prefix="/api/video", tags=["video"])
 VIDEO_DIR = "/tmp/videos"
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
+# Fast status cache to avoid SQLite lock contention during long video jobs.
+_video_job_cache: dict[str, dict] = {}
+
 
 class VideoGenerateRequest(BaseModel):
     """Request to generate a new market recap video."""
@@ -30,7 +34,6 @@ class VideoGenerateRequest(BaseModel):
 @router.post("/generate")
 async def generate_video(
     request: VideoGenerateRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """POST /api/video/generate — Start async video generation, returns job_id."""
@@ -46,7 +49,13 @@ async def generate_video(
     db.add(job)
     await db.commit()
 
-    background_tasks.add_task(_run_video_generation, job_id, request.type, request.period)
+    _video_job_cache[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "error": None,
+    }
+
+    asyncio.create_task(_run_video_generation(job_id, request.type, request.period))
 
     return {
         "job_id": job_id,
@@ -58,6 +67,16 @@ async def generate_video(
 @router.get("/status/{job_id}")
 async def get_video_status(job_id: str, db: AsyncSession = Depends(get_db)):
     """GET /api/video/status/{job_id} — Check generation progress."""
+    cached = _video_job_cache.get(job_id)
+    if cached:
+        return {
+            "job_id": job_id,
+            "status": cached.get("status", "pending"),
+            "progress": cached.get("progress", 0),
+            "video_url": f"/api/video/download/{job_id}" if cached.get("status") == "completed" else None,
+            "error": cached.get("error"),
+        }
+
     job = await db.get(VideoJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Video job not found")
@@ -110,42 +129,43 @@ async def _run_video_generation(job_id: str, video_type: str, period: str):
     from backend.agents.video_engine import VideoScriptAgent
     from backend.database import AsyncSessionLocal
 
-    async with AsyncSessionLocal() as db:
-        job = await db.get(VideoJob, job_id)
-        if not job:
+    async def update_job(**fields):
+        cache_entry = _video_job_cache.setdefault(job_id, {"status": "pending", "progress": 0, "error": None})
+        cache_entry["status"] = fields.get("status", cache_entry.get("status"))
+        cache_entry["progress"] = fields.get("progress", cache_entry.get("progress", 0))
+        cache_entry["error"] = fields.get("error_message", cache_entry.get("error"))
+
+        async with AsyncSessionLocal() as db:
+            job = await db.get(VideoJob, job_id)
+            if not job:
+                return False
+            for key, value in fields.items():
+                setattr(job, key, value)
+            await db.commit()
+            return True
+
+    try:
+        exists = await update_job(status="processing", progress=10)
+        if not exists:
             return
 
-        try:
-            job.status = "processing"
-            job.progress = 10
-            await db.commit()
+        agent = VideoScriptAgent()
+        target_date = date.today()
 
-            agent = VideoScriptAgent()
+        script = await agent.generate_market_wrap_script(target_date)
+        await update_job(script_text=script.narration_text, progress=40)
 
-            # Determine target date
-            target_date = date.today()
+        video_path = await agent.generate_video(script, job_id=job_id)
+        await update_job(progress=90)
 
-            # Generate script
-            script = await agent.generate_market_wrap_script(target_date)
-            job.script_text = script.narration_text
-            job.progress = 40
-            await db.commit()
+        await update_job(
+            video_path=video_path,
+            status="completed",
+            progress=100,
+            completed_at=datetime.utcnow(),
+        )
+        logger.info("Video job completed", job_id=job_id, path=video_path)
 
-            # Generate video
-            video_path = await agent.generate_video(script, job_id=job_id)
-            job.progress = 90
-            await db.commit()
-
-            job.video_path = video_path
-            job.status = "completed"
-            job.progress = 100
-            job.completed_at = datetime.utcnow()
-            await db.commit()
-
-            logger.info("Video job completed", job_id=job_id, path=video_path)
-
-        except Exception as e:
-            logger.error("Video job failed", job_id=job_id, error=str(e))
-            job.status = "failed"
-            job.error_message = str(e)
-            await db.commit()
+    except Exception as e:
+        logger.error("Video job failed", job_id=job_id, error=str(e))
+        await update_job(status="failed", error_message=str(e))

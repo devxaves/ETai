@@ -27,18 +27,31 @@ async def get_market_summary():
         try:
             nifty, niftybank, quotes = await asyncio.wait_for(
                 asyncio.gather(nifty_task, niftybank_task, quotes_task, return_exceptions=True),
-                timeout=2.0
+                timeout=5.0  # Increased timeout to allow Bhavcopy fallback
             )
         except asyncio.TimeoutError:
             logger.warning("Market summary fetch timed out, falling back to cached/demo data")
             return _get_demo_market_summary()
 
-        if isinstance(nifty, Exception) or nifty.get("price") == 0:
-            nifty = {"price": 22500, "change": 112.5, "change_pct": 0.5}
-        if isinstance(niftybank, Exception) or niftybank.get("price") == 0:
-            niftybank = {"price": 47800, "change": -230, "change_pct": -0.48}
-        if isinstance(quotes, (Exception, type(None))) or not quotes:
+        # Handle results, even if they're exceptions
+        if isinstance(nifty, Exception):
+            nifty = {"price": 0, "change": 0, "change_pct": 0}
+        if isinstance(niftybank, Exception):
+            niftybank = {"price": 0, "change": 0, "change_pct": 0}
+        if isinstance(quotes, Exception):
             quotes = []
+
+        # Use real data if we got prices, otherwise use demo
+        if (nifty.get("price", 0) > 0 and niftybank.get("price", 0) > 0) or quotes:
+            if nifty.get("price", 0) == 0:
+                nifty = {"price": 22500, "change": 112.5, "change_pct": 0.5}
+            if niftybank.get("price", 0) == 0:
+                niftybank = {"price": 47800, "change": -230, "change_pct": -0.48}
+            if not quotes:
+                quotes = []
+        else:
+            logger.warning("No real market data available, using demo data")
+            return _get_demo_market_summary()
 
         gainers = sorted(quotes, key=lambda x: x.get("change_pct", 0), reverse=True)[:5]
         losers = sorted(quotes, key=lambda x: x.get("change_pct", 0))[:5]

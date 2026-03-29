@@ -136,7 +136,7 @@ async def get_historical_ohlcv(symbol: str, days: int = 365) -> pd.DataFrame:
 
 async def get_live_quote(symbol: str) -> dict:
     """
-    Fetch real-time quote for a symbol.
+    Fetch real-time quote for a symbol with retry logic and NSE Bhavcopy fallback.
     """
     import time
 
@@ -148,40 +148,64 @@ async def get_live_quote(symbol: str) -> dict:
 
     ticker_symbol = f"{symbol}.NS"
 
-    try:
-        async with _fetch_semaphore:
-            # Crucial: Move Ticker creation to thread as it can do sync requests in __init__
-            info = await asyncio.wait_for(
-                asyncio.to_thread(lambda: yf.Ticker(ticker_symbol).fast_info),
-                timeout=10.0
-            )
-
-            quote = {
-                "symbol": symbol,
-                "price": getattr(info, "last_price", 0) or 0,
-                "change": getattr(info, "regular_market_change", 0) or 0,
-                "change_pct": getattr(info, "regular_market_change_percent", 0) or 0,
-                "volume": getattr(info, "regular_market_volume", 0) or 0,
-                "high_52w": getattr(info, "year_high", 0) or 0,
-                "low_52w": getattr(info, "year_low", 0) or 0,
-                "market_cap": getattr(info, "market_cap", 0) or 0,
-            }
-
-            if quote["price"] == 0:
-                history = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: yf.Ticker(ticker_symbol).history(period="1d")),
-                    timeout=5.0
+    for attempt in range(2):  # Reduced to 2 attempts since yfinance is clearly broken
+        try:
+            async with _fetch_semaphore:
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: yf.Ticker(ticker_symbol).fast_info),
+                    timeout=10.0
                 )
-                if not history.empty:
-                    quote["price"] = history["Close"].iloc[-1]
-                    quote["change_pct"] = ((history["Close"].iloc[-1] - history["Open"].iloc[0]) / history["Open"].iloc[0] * 100) if history["Open"].iloc[0] != 0 else 0
 
-        _quote_cache[symbol] = (time.time(), quote)
-        return quote
+                quote = {
+                    "symbol": symbol,
+                    "price": getattr(info, "last_price", 0) or 0,
+                    "change": getattr(info, "regular_market_change", 0) or 0,
+                    "change_pct": getattr(info, "regular_market_change_percent", 0) or 0,
+                    "volume": getattr(info, "regular_market_volume", 0) or 0,
+                    "high_52w": getattr(info, "year_high", 0) or 0,
+                    "low_52w": getattr(info, "year_low", 0) or 0,
+                    "market_cap": getattr(info, "market_cap", 0) or 0,
+                }
 
+                if quote["price"] > 0:
+                    _quote_cache[symbol] = (time.time(), quote)
+                    return quote
+
+        except Exception as e:
+            logger.debug("yfinance attempt failed", symbol=symbol, attempt=attempt + 1, error=str(e)[:50])
+            if attempt < 1:
+                await asyncio.sleep(1)
+
+    # yfinance failed completely — fall back to NSE Bhavcopy
+    logger.warning("yfinance failed, using NSE Bhavcopy fallback", symbol=symbol)
+    try:
+        bhavcopy_df = await download_bhavcopy(date.today())
+
+        if bhavcopy_df.empty:
+            bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+
+        if not bhavcopy_df.empty:
+            sym_data = bhavcopy_df[bhavcopy_df["symbol"] == symbol]
+            if not sym_data.empty:
+                row = sym_data.iloc[-1]
+                change_pct = ((row["close"] - row["open"]) / row["open"] * 100) if row["open"] > 0 else 0
+                quote = {
+                    "symbol": symbol,
+                    "price": float(row["close"]),
+                    "change": float(row["close"] - row["open"]),
+                    "change_pct": float(change_pct),
+                    "volume": float(row["volume"]),
+                    "high_52w": float(row["high"]),
+                    "low_52w": float(row["low"]),
+                    "market_cap": 0,
+                }
+                _quote_cache[symbol] = (time.time(), quote)
+                return quote
     except Exception as e:
-        logger.warning("Live quote failed", symbol=symbol, error=str(e))
-        return {"symbol": symbol, "price": 0, "change": 0, "change_pct": 0, "error": str(e)}
+        logger.error("NSE Bhavcopy fallback failed", symbol=symbol, error=str(e)[:50])
+
+    # Both failed — return zero
+    return {"symbol": symbol, "price": 0, "change": 0, "change_pct": 0}
 
 
 async def get_52week_data(symbol: str) -> dict:
@@ -209,12 +233,39 @@ async def get_52week_data(symbol: str) -> dict:
 
 
 async def get_nifty50_quotes() -> list[dict]:
-    """Fetch live quotes for all Nifty 50 stocks."""
+    """Fetch live quotes for all Nifty 50 stocks, using NSE Bhavcopy as fallback."""
     from backend.config import NIFTY50_SYMBOLS
     try:
+        # First, try yfinance
         tasks = [get_live_quote(sym) for sym in NIFTY50_SYMBOLS]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        quotes = [r for r in results if isinstance(r, dict) and r.get("price")]
+        quotes = [r for r in results if isinstance(r, dict) and r.get("price", 0) > 0]
+
+        # If yfinance completely failed (0 quotes), fall back to NSE Bhavcopy
+        if len(quotes) < 5:  # Too few quotes, probably yfinance is down
+            logger.warning("yfinance returned insufficient data, using NSE Bhavcopy fallback", quotes_count=len(quotes))
+            bhavcopy_df = await download_bhavcopy(date.today())
+
+            if bhavcopy_df.empty:
+                bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+
+            if not bhavcopy_df.empty:
+                # Convert Bhavcopy to quote format
+                for symbol in NIFTY50_SYMBOLS:
+                    if symbol not in [q["symbol"] for q in quotes]:
+                        sym_data = bhavcopy_df[bhavcopy_df["symbol"] == symbol]
+                        if not sym_data.empty:
+                            row = sym_data.iloc[-1]
+                            # Calculate change_pct from day's OHLC
+                            change_pct = ((row["close"] - row["open"]) / row["open"] * 100) if row["open"] > 0 else 0
+                            quotes.append({
+                                "symbol": symbol,
+                                "price": float(row["close"]),
+                                "change": float(row["close"] - row["open"]),
+                                "change_pct": float(change_pct),
+                                "volume": float(row["volume"]),
+                            })
+
         quotes.sort(key=lambda x: x.get("change_pct", 0), reverse=True)
         return quotes
     except Exception as e:

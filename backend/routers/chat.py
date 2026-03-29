@@ -2,6 +2,7 @@
 routers/chat.py — Portfolio upload, RAG chat, and session management endpoints.
 """
 
+import asyncio
 import uuid
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -200,16 +201,32 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
     """DELETE /api/chat/session/{session_id} — Cleanup session and embeddings."""
     from backend.data.embeddings import delete_portfolio_context
 
-    session = await db.get(ChatSession, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    async def _delete_session_record() -> bool:
+        session = await db.get(ChatSession, session_id)
+        if not session:
+            return False
+        await db.delete(session)
+        await db.commit()
+        return True
 
-    await db.delete(session)
-    await db.commit()
-
+    deleted = False
     try:
-        await delete_portfolio_context(session_id)
+        deleted = await asyncio.wait_for(_delete_session_record(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.warning("Session deletion timed out", session_id=session_id)
     except Exception as e:
-        logger.warning("Embedding cleanup failed", error=str(e))
+        logger.warning("Session deletion failed", session_id=session_id, error=str(e))
 
-    return {"message": f"Session {session_id} deleted successfully"}
+    async def _cleanup_embeddings():
+        try:
+            await asyncio.wait_for(delete_portfolio_context(session_id), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("Embedding cleanup timed out", session_id=session_id)
+        except Exception as e:
+            logger.warning("Embedding cleanup failed", error=str(e))
+
+    asyncio.create_task(_cleanup_embeddings())
+
+    if deleted:
+        return {"message": f"Session {session_id} deleted successfully"}
+    return {"message": f"Session {session_id} cleanup scheduled"}
