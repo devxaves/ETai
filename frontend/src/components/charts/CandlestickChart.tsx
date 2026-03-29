@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createChart, ColorType, CandlestickData, Time, CandlestickSeries, HistogramSeries, createSeriesMarkers } from "lightweight-charts";
+import {
+  createChart,
+  ColorType,
+  CandlestickData,
+  Time,
+  CandlestickSeries,
+  HistogramSeries,
+  createSeriesMarkers,
+} from "lightweight-charts";
 
 interface PatternMarker {
   time: Time;
@@ -18,7 +26,12 @@ interface Props {
   height?: number;
 }
 
-export default function CandlestickChart({ data, volumeData, patterns, height = 400 }: Props) {
+export default function CandlestickChart({
+  data,
+  volumeData,
+  patterns,
+  height = 400,
+}: Props) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [chartReady, setChartReady] = useState(false);
 
@@ -90,7 +103,9 @@ export default function CandlestickChart({ data, volumeData, patterns, height = 
       setChartReady(true);
 
       const handleResize = () => {
-        chart.applyOptions({ width: chartContainerRef.current?.clientWidth || 0 });
+        chart.applyOptions({
+          width: chartContainerRef.current?.clientWidth || 0,
+        });
       };
 
       window.addEventListener("resize", handleResize);

@@ -44,6 +44,10 @@ export default function ChartsPage() {
   const { data, error, isLoading } = useSWR(
     `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/patterns/${symbol}?days=90`,
     fetcher,
+    {
+      revalidateOnFocus: false,
+      dedupingInterval: 60000,
+    },
   );
 
   const handleSearch = (e: React.FormEvent) => {
@@ -60,11 +64,8 @@ export default function ChartsPage() {
 
   if (data?.chart_data) {
     chartData = data.chart_data.map((d: any) => {
-      const dateStr = safeParseDateString(d.date);
-      const [year, month, day] = dateStr.split("-").map(Number);
-
       return {
-        time: { year, month, day },
+        time: d.time || safeParseDateString(d.date),
         open: parseFloat(d.open) || 0,
         high: parseFloat(d.high) || 0,
         low: parseFloat(d.low) || 0,
@@ -73,11 +74,8 @@ export default function ChartsPage() {
     });
 
     volumeData = data.chart_data.map((d: any) => {
-      const dateStr = safeParseDateString(d.date);
-      const [year, month, day] = dateStr.split("-").map(Number);
-
       return {
-        time: { year, month, day },
+        time: d.time || safeParseDateString(d.date),
         value: parseFloat(d.volume) || 0,
         color:
           (parseFloat(d.close) || 0) >= (parseFloat(d.open) || 0)

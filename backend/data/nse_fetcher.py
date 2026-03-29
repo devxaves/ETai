@@ -6,6 +6,7 @@ import asyncio
 import io
 from datetime import date, datetime, timedelta
 from typing import Optional
+import time
 import httpx
 import pandas as pd
 import structlog
@@ -17,8 +18,25 @@ logger = structlog.get_logger(__name__)
 _quote_cache: dict = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
+# Cache Bhavcopy per trade date to avoid repeated downloads across concurrent API calls
+_bhavcopy_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_BHAVCOPY_CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+# Symbol-level cooldown for unstable/delisted yfinance responses.
+_yf_symbol_cooldown: dict[str, float] = {}
+_YF_COOLDOWN_SECONDS = 900  # 15 minutes
+
 # Semaphore to prevent thread pool exhaustion (max 10 parallel yfinance calls)
 _fetch_semaphore = asyncio.Semaphore(10)
+
+
+def _is_market_open_ist() -> bool:
+    """Return True when NSE cash market is open (Mon-Fri, 09:15-15:30 IST)."""
+    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    if ist_now.weekday() >= 5:
+        return False
+    minutes = ist_now.hour * 60 + ist_now.minute
+    return (9 * 60 + 15) <= minutes < (15 * 60 + 30)
 
 
 def _get_bhavcopy_url(target_date: date) -> str:
@@ -93,7 +111,7 @@ def _normalize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
             "high": ["HghPric", "HighPrice", "HIGHPRICE"],
             "low": ["LwPric", "LowPrice", "LOWPRICE"],
             "close": ["ClsPric", "ClosePrice", "CLOSEPRICE"],
-            "volume": ["TtlTrdVol", "TotalVolume", "TOTALVOLUME"],
+            "volume": ["TtlTradgVol", "TtlTrdVol", "TotalVolume", "TOTALVOLUME"],
             "date": ["TradDt", "TradeDate", "TRADEDATE"],
         }
 
@@ -174,6 +192,11 @@ async def download_bhavcopy(trade_date: date) -> pd.DataFrame:
     Returns:
         DataFrame with columns: symbol, open, high, low, close, volume, date
     """
+    cache_key = trade_date.isoformat()
+    cached = _bhavcopy_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _BHAVCOPY_CACHE_TTL_SECONDS:
+        return cached[1].copy()
+
     url = _get_bhavcopy_url(trade_date)
 
     headers = {
@@ -198,6 +221,7 @@ async def download_bhavcopy(trade_date: date) -> pd.DataFrame:
             # Normalize columns from either format
             df = _normalize_bhavcopy_columns(df)
 
+            _bhavcopy_cache[cache_key] = (time.time(), df.copy())
             logger.info("Bhavcopy downloaded", date=str(trade_date), rows=len(df), url=url)
             return df
 
@@ -220,7 +244,11 @@ async def download_bhavcopy(trade_date: date) -> pd.DataFrame:
         return pd.DataFrame()
 
     logger.info("Retrying with previous trading date", prev_date=str(prev_date))
-    return await download_bhavcopy(prev_date)
+    fallback_df = await download_bhavcopy(prev_date)
+    if not fallback_df.empty:
+        # Cache fallback under the originally requested date to avoid repeated 404 attempts.
+        _bhavcopy_cache[cache_key] = (time.time(), fallback_df.copy())
+    return fallback_df
 
 
 async def get_historical_ohlcv(symbol: str, days: int = 365) -> pd.DataFrame:
@@ -265,26 +293,53 @@ async def get_historical_ohlcv(symbol: str, days: int = 365) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-async def get_live_quote(symbol: str) -> dict:
+async def get_live_quote(symbol: str, use_bhavcopy_fallback: bool = True) -> dict:
     """
     Fetch real-time quote for a symbol with retry logic and NSE Bhavcopy fallback.
     """
-    import time
-
     # Check cache
     if symbol in _quote_cache:
         cached_time, cached_data = _quote_cache[symbol]
         if time.time() - cached_time < _CACHE_TTL_SECONDS:
             return cached_data
 
+    cooldown_until = _yf_symbol_cooldown.get(symbol, 0)
+    if cooldown_until > time.time():
+        if not use_bhavcopy_fallback:
+            return {"symbol": symbol, "price": 0, "change": 0, "change_pct": 0}
+        logger.debug("Skipping yfinance due to cooldown", symbol=symbol)
+        try:
+            bhavcopy_df = await download_bhavcopy(date.today())
+            if bhavcopy_df.empty:
+                bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+            if not bhavcopy_df.empty:
+                sym_data = bhavcopy_df[bhavcopy_df["symbol"] == symbol]
+                if not sym_data.empty:
+                    row = sym_data.iloc[-1]
+                    change_pct = ((row["close"] - row["open"]) / row["open"] * 100) if row["open"] > 0 else 0
+                    quote = {
+                        "symbol": symbol,
+                        "price": float(row["close"]),
+                        "change": float(row["close"] - row["open"]),
+                        "change_pct": float(change_pct),
+                        "volume": float(row.get("volume", 0) or 0),
+                        "high_52w": float(row["high"]),
+                        "low_52w": float(row["low"]),
+                        "market_cap": 0,
+                    }
+                    _quote_cache[symbol] = (time.time(), quote)
+                    return quote
+        except Exception:
+            pass
+
     ticker_symbol = f"{symbol}.NS"
 
-    for attempt in range(2):  # Reduced to 2 attempts since yfinance is clearly broken
+    for attempt in range(1):
         try:
             async with _fetch_semaphore:
                 info = await asyncio.wait_for(
                     asyncio.to_thread(lambda: yf.Ticker(ticker_symbol).fast_info),
-                    timeout=10.0
+                    timeout=3.0
                 )
 
                 quote = {
@@ -304,8 +359,14 @@ async def get_live_quote(symbol: str) -> dict:
 
         except Exception as e:
             logger.debug("yfinance attempt failed", symbol=symbol, attempt=attempt + 1, error=str(e)[:50])
+            err = str(e).lower()
+            if "delisted" in err or "currenttradingperiod" in err or "not found" in err:
+                _yf_symbol_cooldown[symbol] = time.time() + _YF_COOLDOWN_SECONDS
             if attempt < 1:
                 await asyncio.sleep(1)
+
+    if not use_bhavcopy_fallback:
+        return {"symbol": symbol, "price": 0, "change": 0, "change_pct": 0}
 
     # yfinance failed completely — fall back to NSE Bhavcopy
     logger.warning("yfinance failed, using NSE Bhavcopy fallback", symbol=symbol)
@@ -325,7 +386,7 @@ async def get_live_quote(symbol: str) -> dict:
                     "price": float(row["close"]),
                     "change": float(row["close"] - row["open"]),
                     "change_pct": float(change_pct),
-                    "volume": float(row["volume"]),
+                    "volume": float(row.get("volume", 0) or 0),
                     "high_52w": float(row["high"]),
                     "low_52w": float(row["low"]),
                     "market_cap": 0,
@@ -518,9 +579,40 @@ async def get_nifty50_quotes() -> list[dict]:
     """Fetch live quotes for all Nifty 50 stocks, using NSE Bhavcopy as fallback."""
     from backend.config import NIFTY50_SYMBOLS
     try:
+        if not _is_market_open_ist():
+            bhavcopy_df = await download_bhavcopy(date.today())
+            if bhavcopy_df.empty:
+                bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+            if bhavcopy_df.empty:
+                return []
+
+            quotes = []
+            for symbol in NIFTY50_SYMBOLS:
+                sym_data = bhavcopy_df[bhavcopy_df["symbol"] == symbol]
+                if sym_data.empty:
+                    continue
+                row = sym_data.iloc[-1]
+                change_pct = ((row["close"] - row["open"]) / row["open"] * 100) if row["open"] > 0 else 0
+                quotes.append({
+                    "symbol": symbol,
+                    "price": float(row["close"]),
+                    "change": float(row["close"] - row["open"]),
+                    "change_pct": float(change_pct),
+                    "volume": float(row.get("volume", 0) or 0),
+                })
+            quotes.sort(key=lambda x: x.get("change_pct", 0), reverse=True)
+            return quotes
+
         # First, try yfinance
-        tasks = [get_live_quote(sym) for sym in NIFTY50_SYMBOLS]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [get_live_quote(sym, use_bhavcopy_fallback=False) for sym in NIFTY50_SYMBOLS]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=6.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("yfinance quote batch timed out, using NSE Bhavcopy fallback")
+            results = []
         quotes = [r for r in results if isinstance(r, dict) and r.get("price", 0) > 0]
 
         # If yfinance completely failed (0 quotes), fall back to NSE Bhavcopy
@@ -545,7 +637,7 @@ async def get_nifty50_quotes() -> list[dict]:
                                 "price": float(row["close"]),
                                 "change": float(row["close"] - row["open"]),
                                 "change_pct": float(change_pct),
-                                "volume": float(row["volume"]),
+                                "volume": float(row.get("volume", 0) or 0),
                             })
 
         quotes.sort(key=lambda x: x.get("change_pct", 0), reverse=True)

@@ -15,6 +15,8 @@ router = APIRouter(prefix="/api/patterns", tags=["patterns"])
 
 # Cached Nifty 50 scan results (refreshed by Celery)
 _nifty50_cache: dict = {"patterns": [], "last_updated": None}
+_symbol_pattern_cache: dict = {}
+_SYMBOL_PATTERN_CACHE_TTL_SECONDS = 120
 
 
 @router.get("/nifty50")
@@ -106,6 +108,12 @@ async def get_symbol_patterns(
     """
     symbol = symbol.upper().strip()
 
+    import time
+    cache_key = f"{symbol}:{days}"
+    cached = _symbol_pattern_cache.get(cache_key)
+    if cached and (time.time() - cached["ts"] < _SYMBOL_PATTERN_CACHE_TTL_SECONDS):
+        return cached["payload"]
+
     from backend.agents.chart_patterns import ChartPatternAgent
     import asyncio
 
@@ -135,10 +143,12 @@ async def get_symbol_patterns(
                 pat_dict["success_rate"] = 50.0
         pattern_dicts.append(pat_dict)
 
-    return {
+    payload = {
         "symbol": symbol,
         "patterns": pattern_dicts,
         "chart_data": chart_data,
         "patterns_count": len(pattern_dicts),
         "days_fetched": days,
     }
+    _symbol_pattern_cache[cache_key] = {"ts": time.time(), "payload": payload}
+    return payload

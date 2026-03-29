@@ -21,6 +21,7 @@ async def get_market_summary():
         get_market_breadth_from_bhavcopy,
         get_nifty50_quotes,
     )
+    from backend.data.yfinance_fetcher import get_nifty_index
 
     try:
         # Fetch all data in parallel with generous timeout
@@ -31,7 +32,7 @@ async def get_market_summary():
         try:
             nifty, breadth, quotes = await asyncio.wait_for(
                 asyncio.gather(nifty_task, breadth_task, quotes_task, return_exceptions=True),
-                timeout=10.0
+                timeout=20.0
             )
         except asyncio.TimeoutError:
             logger.warning("Market summary timed out, returning fallback")
@@ -45,9 +46,21 @@ async def get_market_summary():
         if isinstance(quotes, Exception):
             quotes = []
 
-        # If Nifty computation failed, fall back to demo
+        # If cache computation failed, use direct Nifty index feed.
         if nifty.get("price", 0) == 0:
-            logger.warning("Nifty index is 0, using fallback data")
+            live_nifty = await get_nifty_index()
+            if live_nifty.get("price", 0) > 0:
+                live_change_pct = float(live_nifty.get("change_pct", 0) or 0)
+                live_price = float(live_nifty.get("price", 0) or 0)
+                nifty = {
+                    "price": round(live_price, 2),
+                    "change": round(live_price * live_change_pct / 100, 2),
+                    "change_pct": round(live_change_pct, 2),
+                }
+
+        # If Nifty is still unavailable and no quotes exist, use fallback response.
+        if nifty.get("price", 0) == 0:
+            logger.warning("Nifty index is 0 and no quotes are available, using fallback data")
             return _get_demo_market_summary()
 
         gainers = sorted(quotes, key=lambda x: x.get("change_pct", 0), reverse=True)[:5]
@@ -104,7 +117,7 @@ async def get_market_movers(top_n: int = Query(default=5, ge=1, le=20)):
 
     try:
         try:
-            quotes = await asyncio.wait_for(get_nifty50_quotes(), timeout=2.0)
+            quotes = await asyncio.wait_for(get_nifty50_quotes(), timeout=8.0)
         except asyncio.TimeoutError:
             logger.warning("Market movers timed out — returning demo")
             return _get_demo_movers(top_n)
@@ -128,7 +141,7 @@ async def get_sector_performance():
         try:
             sector_results = await asyncio.wait_for(
                 get_sector_performance_from_bhavcopy(),
-                timeout=10.0
+                timeout=20.0
             )
         except asyncio.TimeoutError:
             logger.warning("Sector performance timed out, returning empty")
@@ -148,6 +161,19 @@ async def get_sector_performance():
         logger.error("Sector performance failed", error=str(e))
         from backend.config import SECTOR_SYMBOLS
         return {"sectors": {s: {"avg_change_pct": 0.0, "direction": "flat", "stocks": []} for s in SECTOR_SYMBOLS}}
+
+
+@router.get("/nifty-history")
+async def get_nifty_history(days: int = Query(default=60, ge=10, le=365)):
+    """GET /api/market/nifty-history — Nifty 50 daily OHLC series for dashboard charts."""
+    from backend.data.yfinance_fetcher import get_nifty_history as fetch_nifty_history
+
+    try:
+        data = await fetch_nifty_history(days=days)
+        return {"symbol": "NIFTY50", "chart_data": data, "total": len(data)}
+    except Exception as e:
+        logger.error("Nifty history endpoint failed", error=str(e))
+        return {"symbol": "NIFTY50", "chart_data": [], "total": 0}
 
 
 def _get_fii_dii_data() -> dict:

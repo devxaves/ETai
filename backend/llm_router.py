@@ -146,41 +146,46 @@ class LLMRouter:
                 yield text
 
     async def _call_gemini(self, prompt: str, system: str, max_tokens: int) -> str:
-        """Call Google Gemini API using the new genai.Client() interface."""
+        """Call Google Gemini API via google-generativeai client."""
         from backend.config import settings, GEMINI_MODEL
 
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY not configured")
 
-        from google import genai
+        import google.generativeai as genai
 
-        # Initialize client (lazy - only when first needed)
-        if not hasattr(self, '_gemini_client'):
-            self._gemini_client = genai.Client(api_key=settings.gemini_api_key)
+        if self._gemini_client is None:
+            genai.configure(api_key=settings.gemini_api_key)
+            self._gemini_client = genai.GenerativeModel(GEMINI_MODEL)
 
-        # Build message with system prompt if provided
-        messages = []
-        if system:
-            messages.append({"role": "user", "content": system})
-            messages.append({"role": "model", "content": "Understood."})
-
-        messages.append({"role": "user", "content": prompt})
-
-        # Call Gemini model
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
         response = await asyncio.to_thread(
-            self._gemini_client.models.generate_content,
-            model=GEMINI_MODEL,
-            contents=messages,
-            config={
+            self._gemini_client.generate_content,
+            full_prompt,
+            generation_config={
                 "max_output_tokens": max_tokens,
                 "temperature": 0.7,
-            }
+            },
         )
 
-        return response.text
+        if getattr(response, "text", None):
+            return response.text
+
+        # Fallback extraction for partial/blocked responses.
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            if not content:
+                continue
+            parts = getattr(content, "parts", None) or []
+            text_parts = [getattr(part, "text", "") for part in parts if getattr(part, "text", "")]
+            if text_parts:
+                return "\n".join(text_parts)
+
+        raise RuntimeError("Gemini returned an empty response")
 
     async def _call_groq(self, prompt: str, system: str, max_tokens: int) -> str:
-        """Call Groq API (llama-3.1-8b-instant)."""
+        """Call Groq API (qwen/qwen3-32b)."""
         from backend.config import settings, GROQ_MODEL
 
         if not settings.groq_api_key:

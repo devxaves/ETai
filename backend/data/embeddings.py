@@ -60,7 +60,18 @@ async def embed_texts(texts: List[str]) -> List[List[float]]:
         List of embedding vectors.
     """
     model = _get_embedding_model()
-    embeddings = await asyncio.to_thread(model.encode, texts, convert_to_list=True)
+    # Use normalize_embeddings parameter for newer sentence-transformers versions
+    # Avoid deprecated parameters like convert_to_list
+    try:
+        embeddings = await asyncio.to_thread(
+            model.encode, texts, normalize_embeddings=True
+        )
+    except TypeError:
+        # Fallback for older versions or parameter mismatch
+        embeddings = await asyncio.to_thread(model.encode, texts)
+    # Normalize output to plain Python lists for Chroma compatibility.
+    if hasattr(embeddings, "tolist"):
+        return embeddings.tolist()
     return embeddings
 
 

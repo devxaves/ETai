@@ -30,6 +30,36 @@ export default function Dashboard() {
     fetcher,
   );
 
+  const { data: chartSource } = useSWR(
+    `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/market/nifty-history?days=60`,
+    fetcher,
+    { refreshInterval: 60000 },
+  );
+
+  const chartData = Array.isArray(chartSource?.chart_data)
+    ? chartSource.chart_data
+        .map((row: any) => ({
+          time:
+            typeof row.time === "number"
+              ? row.time
+              : typeof row.date === "string"
+                ? row.date.split("T")[0]
+                : row.date,
+          open: Number(row.open) || 0,
+          high: Number(row.high) || 0,
+          low: Number(row.low) || 0,
+          close: Number(row.close) || 0,
+        }))
+        .filter(
+          (row: any) =>
+            row.time &&
+            row.open > 0 &&
+            row.high > 0 &&
+            row.low > 0 &&
+            row.close > 0,
+        )
+    : [];
+
   const heatmapArray = sectorData?.sectors
     ? Object.entries(sectorData.sectors).map(([name, data]: any) => ({
         name,
@@ -71,24 +101,9 @@ export default function Dashboard() {
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-[#111111] border border-[#2a2a2a] rounded-lg p-5">
             <h2 className="text-white font-bold tracking-wide uppercase text-sm mb-4">
-              Market Technical Overview (^NSEI)
+              Market Technical Overview (NIFTY 50)
             </h2>
-            {/* For demo, mock standard Nifty line to avoid failing when nse API throws 429 */}
-            <CandlestickChart
-              data={Array.from({ length: 60 }).map((_, i) => {
-                const base = 22000;
-                const date = new Date();
-                date.setDate(date.getDate() - (60 - i));
-                return {
-                  time: date.toISOString().split("T")[0] as string,
-                  open: base + i * 10 + Math.random() * 50,
-                  high: base + i * 10 + Math.random() * 100,
-                  low: base + i * 10 - Math.random() * 100,
-                  close: base + i * 10 + Math.random() * 80,
-                };
-              })}
-              height={300}
-            />
+            <CandlestickChart data={chartData} height={300} />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

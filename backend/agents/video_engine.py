@@ -10,6 +10,19 @@ from datetime import date, datetime
 from typing import Optional
 import structlog
 
+try:
+    from PIL import Image
+    # Pillow 10.0.0+ removed Image.ANTIALIAS; use Resampling.LANCZOS instead
+    if not hasattr(Image, "ANTIALIAS"):
+        if hasattr(Image, "Resampling"):
+            Image.ANTIALIAS = Image.Resampling.LANCZOS
+        else:
+            # Fallback for very new Pillow versions
+            Image.ANTIALIAS = 1  # LANCZOS constant value
+except Exception:
+    # Pillow not required at import time; MoviePy path handles runtime fallback.
+    pass
+
 from backend.llm_router import llm_router
 
 logger = structlog.get_logger(__name__)
@@ -403,13 +416,14 @@ Return ONLY the script text, no labels or headers."""
     async def _fetch_market_summary(self, target_date: date) -> dict:
         """Fetch market summary data for the script."""
         try:
-            from backend.data.nse_fetcher import get_nifty50_quotes, get_live_quote
+            from backend.data.nse_fetcher import get_nifty50_quotes
+            from backend.data.yfinance_fetcher import get_nifty_index
             quotes = await get_nifty50_quotes()
 
             gainers = [q["symbol"] for q in sorted(quotes, key=lambda x: x.get("change_pct", 0), reverse=True)[:3]]
             losers = [q["symbol"] for q in sorted(quotes, key=lambda x: x.get("change_pct", 0))[:3]]
 
-            nifty_quote = await get_live_quote("^NSEI")
+            nifty_quote = await get_nifty_index()
             return {
                 "nifty_close": nifty_quote.get("price", 22500),
                 "nifty_change_pct": nifty_quote.get("change_pct", 0),

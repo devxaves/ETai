@@ -4,6 +4,7 @@ Scans all Nifty 50 symbols, detects chart patterns, backtests success rates.
 """
 
 import asyncio
+import time
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Dict, Tuple
 import numpy as np
@@ -14,6 +15,10 @@ from backend.llm_router import llm_router
 from backend.config import NIFTY50_SYMBOLS
 
 logger = structlog.get_logger(__name__)
+
+# Pattern scan result cache with TTL to prevent repeated scans
+_pattern_cache: Dict[str, tuple] = {}  # {symbol: (timestamp, results)}
+_PATTERN_CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # All TA-Lib CDL function names to scan for
 CDL_PATTERNS = [
@@ -105,6 +110,7 @@ class ChartPatternAgent:
     async def scan_symbol(self, symbol: str) -> List[PatternDetection]:
         """
         Scan a single symbol for all candlestick patterns + technical indicators.
+        Results are cached for 5 minutes to prevent repeated scans.
 
         Args:
             symbol: NSE symbol (e.g. "RELIANCE")
@@ -112,12 +118,21 @@ class ChartPatternAgent:
         Returns:
             List of detected PatternDetection objects.
         """
+        # Check cache first
+        if symbol in _pattern_cache:
+            cached_time, cached_results = _pattern_cache[symbol]
+            if time.time() - cached_time < _PATTERN_CACHE_TTL_SECONDS:
+                logger.debug("Using cached pattern scan", symbol=symbol)
+                return cached_results
+
         from backend.data.nse_fetcher import get_historical_ohlcv
 
         try:
             df = await get_historical_ohlcv(symbol, days=200)
             if df.empty or len(df) < 50:
                 logger.warning("Insufficient data for pattern scan", symbol=symbol)
+                # Cache empty result
+                _pattern_cache[symbol] = (time.time(), [])
                 return []
 
             # Ensure sorted by date
@@ -174,10 +189,14 @@ class ChartPatternAgent:
             # Sort by confidence
             detected.sort(key=lambda x: x.confidence_score, reverse=True)
             logger.info("Pattern scan complete", symbol=symbol, patterns=len(detected))
+            # Cache the results before returning
+            _pattern_cache[symbol] = (time.time(), detected)
             return detected
 
         except Exception as e:
             logger.error("Symbol scan failed", symbol=symbol, error=str(e))
+            # Cache the error result to prevent repeated attempts
+            _pattern_cache[symbol] = (time.time(), [])
             return []
 
     def _base_indicator_signals(self, symbol, df, last_close, last_date, rsi, macd, bb_pos) -> List[PatternDetection]:
@@ -215,6 +234,7 @@ class ChartPatternAgent:
                     ))
         except Exception as e:
             logger.warning("Base signal fallback failed", symbol=symbol, error=str(e))
+        
         return detected
 
     def _calculate_rsi(self, close: np.ndarray, period: int = 14) -> np.ndarray:

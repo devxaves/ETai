@@ -16,7 +16,9 @@ function getMarketStatus(): MarketStatus {
   const now = new Date();
 
   // Convert to IST (UTC+5:30)
-  const istDate = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const istDate = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
+  );
   const hours = istDate.getHours();
   const minutes = istDate.getMinutes();
   const dayOfWeek = istDate.getDay(); // 0=Sunday, 1=Monday, ..., 5=Friday, 6=Saturday
@@ -29,7 +31,10 @@ function getMarketStatus(): MarketStatus {
   // Check if it's a trading day (Mon-Fri)
   const isTradingDay = dayOfWeek >= 1 && dayOfWeek <= 5;
 
-  const isOpen = isTradingDay && currentTime >= marketOpenTime && currentTime < marketCloseTime;
+  const isOpen =
+    isTradingDay &&
+    currentTime >= marketOpenTime &&
+    currentTime < marketCloseTime;
 
   if (!isTradingDay) {
     return { isOpen: false, status: "MARKET CLOSED (Weekend)" };
@@ -48,12 +53,15 @@ function getMarketStatus(): MarketStatus {
 
 export default function Header() {
   const [time, setTime] = useState<Date | null>(null);
-  const [marketStatus, setMarketStatus] = useState<MarketStatus>({ isOpen: false, status: "Loading..." });
+  const [marketStatus, setMarketStatus] = useState<MarketStatus>({
+    isOpen: false,
+    status: "Loading...",
+  });
 
   const { data: marketData, error } = useSWR(
     `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/market/summary`,
     fetcher,
-    { refreshInterval: 60000, keepPreviousData: true }
+    { refreshInterval: 15000, keepPreviousData: true },
   );
 
   useEffect(() => {
@@ -89,27 +97,34 @@ export default function Header() {
             <div
               className={cn(
                 "w-2 h-2 rounded-full pulse-live",
-                marketStatus.isOpen ? "bg-green-500" : "bg-red-500"
+                marketStatus.isOpen ? "bg-green-500" : "bg-red-500",
               )}
             ></div>
-            <span className="text-sm font-medium text-white tracking-wide">{marketStatus.status}</span>
+            <span className="text-sm font-medium text-white tracking-wide">
+              {marketStatus.status}
+            </span>
           </div>
 
           <div className="h-6 w-px bg-[#2a2a2a]"></div>
 
           <div className="flex items-center gap-3">
-            <span className="text-[#888888] text-sm hidden md:inline">NIFTY 50</span>
+            <span className="text-[#888888] text-sm hidden md:inline">
+              NIFTY 50
+            </span>
             {marketData ? (
               <div className="flex items-center gap-2 tabular-nums">
-                <span className="text-white font-semibold">{marketData.nifty50.value.toLocaleString()}</span>
+                <span className="text-white font-semibold">
+                  {marketData.nifty50.value.toLocaleString()}
+                </span>
                 <span
                   className={cn(
                     "text-sm font-medium",
-                    isNiftyUp ? "text-green-400" : "text-red-400"
+                    isNiftyUp ? "text-green-400" : "text-red-400",
                   )}
                 >
                   {isNiftyUp ? "▲ " : "▼ "}
-                  {marketData.nifty50.change.toFixed(2)} ({marketData.nifty50.change_pct.toFixed(2)}%)
+                  {marketData.nifty50.change.toFixed(2)} (
+                  {marketData.nifty50.change_pct.toFixed(2)}%)
                 </span>
               </div>
             ) : (
