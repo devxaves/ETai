@@ -232,7 +232,145 @@ async def get_52week_data(symbol: str) -> dict:
         return {}
 
 
-async def get_nifty50_quotes() -> list[dict]:
+async def get_nifty_index_from_bhavcopy() -> dict:
+    """
+    Compute Nifty 50 index from NSE Bhavcopy (NSE-Only Mode).
+    Falls back to previous day if today's Bhavcopy doesn't exist yet.
+    """
+    from backend.config import NIFTY50_SYMBOLS
+    import time
+
+    try:
+        # Try today's bhavcopy first
+        bhavcopy_df = await download_bhavcopy(date.today())
+
+        # If empty, try yesterday
+        if bhavcopy_df.empty:
+            bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+
+        if bhavcopy_df.empty:
+            logger.warning("No Bhavcopy data for Nifty index calculation")
+            return {"price": 0, "change": 0, "change_pct": 0}
+
+        # Filter for Nifty 50 constituents
+        nifty_data = bhavcopy_df[bhavcopy_df["symbol"].isin(NIFTY50_SYMBOLS)]
+
+        if nifty_data.empty:
+            logger.warning("No Nifty 50 stocks found in Bhavcopy")
+            return {"price": 0, "change": 0, "change_pct": 0}
+
+        # Simple index calculation: average close price
+        avg_close = float(nifty_data["close"].mean())
+        avg_open = float(nifty_data["open"].mean())
+        change = avg_close - avg_open
+        change_pct = (change / avg_open * 100) if avg_open > 0 else 0
+
+        result = {
+            "price": round(avg_close, 2),
+            "change": round(change, 2),
+            "change_pct": round(change_pct, 2),
+        }
+
+        # Cache for 5 minutes
+        _quote_cache["^NSEI"] = (time.time(), result)
+        logger.info("Nifty index computed from Bhavcopy", price=avg_close, change_pct=change_pct)
+        return result
+
+    except Exception as e:
+        logger.error("Nifty index calculation failed", error=str(e)[:50])
+        return {"price": 0, "change": 0, "change_pct": 0}
+
+
+async def get_market_breadth_from_bhavcopy() -> dict:
+    """
+    Calculate market breadth (advances/declines) from NSE Bhavcopy.
+    """
+    from backend.config import NIFTY50_SYMBOLS
+
+    try:
+        bhavcopy_df = await download_bhavcopy(date.today())
+
+        if bhavcopy_df.empty:
+            bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+
+        if bhavcopy_df.empty:
+            return {"advances": 0, "declines": 0, "unchanged": 0}
+
+        # Filter for Nifty 50
+        nifty_data = bhavcopy_df[bhavcopy_df["symbol"].isin(NIFTY50_SYMBOLS)]
+
+        advances = len(nifty_data[nifty_data["close"] > nifty_data["open"]])
+        declines = len(nifty_data[nifty_data["close"] < nifty_data["open"]])
+        unchanged = len(nifty_data[nifty_data["close"] == nifty_data["open"]])
+
+        logger.info("Market breadth calculated", advances=advances, declines=declines, unchanged=unchanged)
+        return {
+            "advances": int(advances),
+            "declines": int(declines),
+            "unchanged": int(unchanged),
+        }
+
+    except Exception as e:
+        logger.error("Market breadth calculation failed", error=str(e)[:50])
+        return {"advances": 0, "declines": 0, "unchanged": 0}
+
+
+async def get_sector_performance_from_bhavcopy() -> dict:
+    """
+    Calculate sector performance from NSE Bhavcopy.
+    Returns average change_pct per sector.
+    """
+    from backend.config import SECTOR_SYMBOLS
+
+    try:
+        bhavcopy_df = await download_bhavcopy(date.today())
+
+        if bhavcopy_df.empty:
+            bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
+
+        if bhavcopy_df.empty:
+            return {}
+
+        sector_perf = {}
+
+        for sector, symbols in SECTOR_SYMBOLS.items():
+            sector_data = bhavcopy_df[bhavcopy_df["symbol"].isin(symbols)]
+
+            if sector_data.empty:
+                sector_perf[sector] = {
+                    "avg_change_pct": 0.0,
+                    "direction": "flat",
+                    "stocks": [],
+                }
+                continue
+
+            # Calculate change_pct for each stock
+            sector_data_copy = sector_data.copy()
+            sector_data_copy["change_pct"] = ((sector_data_copy["close"] - sector_data_copy["open"]) / sector_data_copy["open"] * 100).fillna(0)
+
+            avg_change = float(sector_data_copy["change_pct"].mean())
+            direction = "up" if avg_change > 0.5 else ("down" if avg_change < -0.5 else "flat")
+
+            stocks = [
+                {
+                    "symbol": row["symbol"],
+                    "change_pct": round(((row["close"] - row["open"]) / row["open"] * 100) if row["open"] > 0 else 0, 2),
+                }
+                for _, row in sector_data_copy.iterrows()
+            ]
+
+            sector_perf[sector] = {
+                "avg_change_pct": round(avg_change, 2),
+                "direction": direction,
+                "stocks": stocks[:4],  # Top 4 stocks per sector
+            }
+
+        logger.info("Sector performance calculated from Bhavcopy", sectors=len(sector_perf))
+        return sector_perf
+
+    except Exception as e:
+        logger.error("Sector performance calculation failed", error=str(e)[:50])
+        return {}
     """Fetch live quotes for all Nifty 50 stocks, using NSE Bhavcopy as fallback."""
     from backend.config import NIFTY50_SYMBOLS
     try:

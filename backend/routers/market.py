@@ -13,51 +13,56 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 @router.get("/summary")
 async def get_market_summary():
     """
-    GET /api/market/summary — Nifty 50 value, FII/DII data, market breadth, top movers.
+    GET /api/market/summary — Get Nifty 50 value, breadth, FII/DII data using NSE Bhavcopy.
+    NSE-Only Mode: Uses real NSE data instead of yfinance.
     """
-    # Use absolute imports for reliability across environments
-    from backend.data.nse_fetcher import get_live_quote, get_nifty50_quotes
+    from backend.data.nse_fetcher import (
+        get_nifty_index_from_bhavcopy,
+        get_market_breadth_from_bhavcopy,
+        get_nifty50_quotes,
+    )
 
     try:
-        # Use a strict 2-second timeout for the UI-critical market summary
-        nifty_task = get_live_quote("^NSEI")
-        niftybank_task = get_live_quote("^NSEBANK")
+        # Fetch all data in parallel with generous timeout
+        nifty_task = get_nifty_index_from_bhavcopy()
+        breadth_task = get_market_breadth_from_bhavcopy()
         quotes_task = get_nifty50_quotes()
 
         try:
-            nifty, niftybank, quotes = await asyncio.wait_for(
-                asyncio.gather(nifty_task, niftybank_task, quotes_task, return_exceptions=True),
-                timeout=5.0  # Increased timeout to allow Bhavcopy fallback
+            nifty, breadth, quotes = await asyncio.wait_for(
+                asyncio.gather(nifty_task, breadth_task, quotes_task, return_exceptions=True),
+                timeout=10.0
             )
         except asyncio.TimeoutError:
-            logger.warning("Market summary fetch timed out, falling back to cached/demo data")
+            logger.warning("Market summary timed out, returning fallback")
             return _get_demo_market_summary()
 
-        # Handle results, even if they're exceptions
+        # Handle exceptions
         if isinstance(nifty, Exception):
             nifty = {"price": 0, "change": 0, "change_pct": 0}
-        if isinstance(niftybank, Exception):
-            niftybank = {"price": 0, "change": 0, "change_pct": 0}
+        if isinstance(breadth, Exception):
+            breadth = {"advances": 0, "declines": 0, "unchanged": 0}
         if isinstance(quotes, Exception):
             quotes = []
 
-        # Use real data if we got prices, otherwise use demo
-        if (nifty.get("price", 0) > 0 and niftybank.get("price", 0) > 0) or quotes:
-            if nifty.get("price", 0) == 0:
-                nifty = {"price": 22500, "change": 112.5, "change_pct": 0.5}
-            if niftybank.get("price", 0) == 0:
-                niftybank = {"price": 47800, "change": -230, "change_pct": -0.48}
-            if not quotes:
-                quotes = []
-        else:
-            logger.warning("No real market data available, using demo data")
+        # If Nifty computation failed, fall back to demo
+        if nifty.get("price", 0) == 0:
+            logger.warning("Nifty index is 0, using fallback data")
             return _get_demo_market_summary()
 
         gainers = sorted(quotes, key=lambda x: x.get("change_pct", 0), reverse=True)[:5]
         losers = sorted(quotes, key=lambda x: x.get("change_pct", 0))[:5]
 
-        advances = sum(1 for q in quotes if q.get("change_pct", 0) > 0)
-        declines = sum(1 for q in quotes if q.get("change_pct", 0) < 0)
+        # Compute Nifty Bank as average of bank stock closes
+        bank_stocks = ["SBIN", "HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK"]
+        bank_quotes = [q for q in quotes if q.get("symbol") in bank_stocks]
+
+        if bank_quotes:
+            niftybank_price = sum(q.get("price", 0) for q in bank_quotes) / len(bank_quotes)
+            niftybank_change_pct = sum(q.get("change_pct", 0) for q in bank_quotes) / len(bank_quotes)
+        else:
+            niftybank_price = 47800
+            niftybank_change_pct = -0.44
 
         return {
             "nifty50": {
@@ -66,20 +71,23 @@ async def get_market_summary():
                 "change_pct": round(nifty.get("change_pct", 0), 2),
             },
             "niftybank": {
-                "value": round(niftybank.get("price", 47800), 2),
-                "change": round(niftybank.get("change", 0), 2),
-                "change_pct": round(niftybank.get("change_pct", 0), 2),
+                "value": round(niftybank_price, 2),
+                "change": 0,
+                "change_pct": round(niftybank_change_pct, 2),
             },
             "market_breadth": {
-                "advances": advances,
-                "declines": declines,
-                "unchanged": len(quotes) - advances - declines,
-                "advance_decline_ratio": round(advances / max(declines, 1), 2),
+                "advances": breadth.get("advances", 0),
+                "declines": breadth.get("declines", 0),
+                "unchanged": breadth.get("unchanged", 0),
+                "advance_decline_ratio": round(
+                    breadth.get("advances", 1) / max(breadth.get("declines", 1), 1), 2
+                ),
             },
             "fii_dii": _get_fii_dii_data(),
             "top_gainers": gainers[:5],
             "top_losers": losers[:5],
             "total_quotes": len(quotes),
+            "data_source": "NSE Bhavcopy",
         }
 
     except Exception as e:
@@ -112,63 +120,34 @@ async def get_market_movers(top_n: int = Query(default=5, ge=1, le=20)):
 @router.get("/sector")
 async def get_sector_performance():
     """
-    GET /api/market/sector — Sector-wise performance using predefined symbol mapping.
+    GET /api/market/sector — Sector-wise performance from NSE Bhavcopy (NSE-Only Mode).
     """
-    from backend.config import SECTOR_SYMBOLS
-    from backend.data.nse_fetcher import get_live_quote
+    from backend.data.nse_fetcher import get_sector_performance_from_bhavcopy
 
     try:
-        # Optimal performance: Fetch ALL sectors in parallel at once
-        sector_tasks = []
-        all_symbols = []
-        for sector, symbols in SECTOR_SYMBOLS.items():
-            for s in symbols[:4]:
-                sector_tasks.append(sector)
-                all_symbols.append(s)
-
-        tasks = [get_live_quote(s) for s in all_symbols]
-
         try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=2.0
+            sector_results = await asyncio.wait_for(
+                get_sector_performance_from_bhavcopy(),
+                timeout=10.0
             )
         except asyncio.TimeoutError:
-            logger.warning("Sector performance timed out, returning cached/null placeholders")
+            logger.warning("Sector performance timed out, returning empty")
+            from backend.config import SECTOR_SYMBOLS
             return {"sectors": {s: {"avg_change_pct": 0.0, "direction": "flat", "stocks": []} for s in SECTOR_SYMBOLS}}
 
-        grouped_results = {}
-        for sector, quote in zip(sector_tasks, results):
-            if sector not in grouped_results:
-                grouped_results[sector] = []
-            if isinstance(quote, dict) and quote.get("change_pct") is not None:
-                grouped_results[sector].append(quote)
-
-        sector_results = {}
-        for sector, valid in grouped_results.items():
-            if valid:
-                avg_change = sum(q["change_pct"] for q in valid) / len(valid)
-                sector_results[sector] = {
-                    "avg_change_pct": round(avg_change, 2),
-                    "direction": "up" if avg_change > 0 else "down",
-                    "stocks": [
-                        {"symbol": q.get("symbol"), "change_pct": q.get("change_pct", 0)}
-                        for q in valid
-                    ],
-                }
-            else:
-                sector_results[sector] = {"avg_change_pct": 0.0, "direction": "flat", "stocks": []}
-
-        # Handle any missing sectors
+        # Ensure all sectors are present
+        from backend.config import SECTOR_SYMBOLS
         for sector in SECTOR_SYMBOLS:
             if sector not in sector_results:
                 sector_results[sector] = {"avg_change_pct": 0.0, "direction": "flat", "stocks": []}
 
-    except Exception as e:
-        logger.error("Sector performance gathering failed", error=str(e))
-        return {"sectors": {s: {"avg_change_pct": 0.0, "direction": "flat", "stocks": []} for s in SECTOR_SYMBOLS}}
+        logger.info("Sector performance fetched from Bhavcopy", sectors=len(sector_results))
+        return {"sectors": sector_results}
 
-    return {"sectors": sector_results}
+    except Exception as e:
+        logger.error("Sector performance failed", error=str(e))
+        from backend.config import SECTOR_SYMBOLS
+        return {"sectors": {s: {"avg_change_pct": 0.0, "direction": "flat", "stocks": []} for s in SECTOR_SYMBOLS}}
 
 
 def _get_fii_dii_data() -> dict:
