@@ -17,14 +17,14 @@ async def get_market_summary():
     NSE-Only Mode: Uses real NSE data instead of yfinance.
     """
     from backend.data.nse_fetcher import (
-        get_nifty_index_from_bhavcopy,
+        get_nifty_index_from_cached_bhavcopy,
         get_market_breadth_from_bhavcopy,
         get_nifty50_quotes,
     )
 
     try:
         # Fetch all data in parallel with generous timeout
-        nifty_task = get_nifty_index_from_bhavcopy()
+        nifty_task = get_nifty_index_from_cached_bhavcopy()
         breadth_task = get_market_breadth_from_bhavcopy()
         quotes_task = get_nifty50_quotes()
 

@@ -232,36 +232,44 @@ async def get_52week_data(symbol: str) -> dict:
         return {}
 
 
-async def get_nifty_index_from_bhavcopy() -> dict:
+async def get_nifty_index_from_cached_bhavcopy() -> dict:
     """
-    Compute Nifty 50 index from NSE Bhavcopy (NSE-Only Mode).
-    Falls back to previous day if today's Bhavcopy doesn't exist yet.
+    Compute Nifty 50 index from cached NSE Bhavcopy in SQLite database.
+    Returns zero if no cached data available.
     """
     from backend.config import NIFTY50_SYMBOLS
+    from backend.database import SessionLocal
+    from backend.models import OHLCData
     import time
 
+    db = None
     try:
-        # Try today's bhavcopy first
-        bhavcopy_df = await download_bhavcopy(date.today())
+        db = SessionLocal()
+        #  Get latest Nifty 50 data from database
+        latest_data = db.query(OHLCData).filter(
+            OHLCData.symbol.in_(NIFTY50_SYMBOLS)
+        ).order_by(OHLCData.date.desc()).all()
 
-        # If empty, try yesterday
-        if bhavcopy_df.empty:
-            bhavcopy_df = await download_bhavcopy(date.today() - timedelta(days=1))
-
-        if bhavcopy_df.empty:
-            logger.warning("No Bhavcopy data for Nifty index calculation")
+        if not latest_data:
+            logger.warning("No cached Bhavcopy data in database")
             return {"price": 0, "change": 0, "change_pct": 0}
 
-        # Filter for Nifty 50 constituents
-        nifty_data = bhavcopy_df[bhavcopy_df["symbol"].isin(NIFTY50_SYMBOLS)]
+        # Get most recent date
+        latest_date = latest_data[0].date
+        today_data = [r for r in latest_data if r.date == latest_date]
 
-        if nifty_data.empty:
-            logger.warning("No Nifty 50 stocks found in Bhavcopy")
+        if len(today_data) < 20:
+            logger.warning("Insufficient cached data", count=len(today_data))
             return {"price": 0, "change": 0, "change_pct": 0}
 
-        # Simple index calculation: average close price
-        avg_close = float(nifty_data["close"].mean())
-        avg_open = float(nifty_data["open"].mean())
+        closes = [float(r.close) for r in today_data if r.close and r.close > 0]
+        opens = [float(r.open) for r in today_data if r.open and r.open > 0]
+
+        if not closes or not opens:
+            return {"price": 0, "change": 0, "change_pct": 0}
+
+        avg_close = sum(closes) / len(closes)
+        avg_open = sum(opens) / len(opens)
         change = avg_close - avg_open
         change_pct = (change / avg_open * 100) if avg_open > 0 else 0
 
@@ -271,14 +279,16 @@ async def get_nifty_index_from_bhavcopy() -> dict:
             "change_pct": round(change_pct, 2),
         }
 
-        # Cache for 5 minutes
         _quote_cache["^NSEI"] = (time.time(), result)
-        logger.info("Nifty index computed from Bhavcopy", price=avg_close, change_pct=change_pct)
+        logger.info("Nifty computed from cache", price=avg_close)
         return result
 
     except Exception as e:
-        logger.error("Nifty index calculation failed", error=str(e)[:50])
+        logger.error("Failed to compute Nifty from cache", error=str(e)[:50])
         return {"price": 0, "change": 0, "change_pct": 0}
+    finally:
+        if db:
+            db.close()
 
 
 async def get_market_breadth_from_bhavcopy() -> dict:
@@ -371,6 +381,9 @@ async def get_sector_performance_from_bhavcopy() -> dict:
     except Exception as e:
         logger.error("Sector performance calculation failed", error=str(e)[:50])
         return {}
+
+
+async def get_nifty50_quotes() -> list[dict]:
     """Fetch live quotes for all Nifty 50 stocks, using NSE Bhavcopy as fallback."""
     from backend.config import NIFTY50_SYMBOLS
     try:
