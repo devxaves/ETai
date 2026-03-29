@@ -7,6 +7,35 @@ import LoadingSpinner from "@/components/ui/LoadingSpinner";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
+// Helper function to safely convert any date format to YYYY-MM-DD
+function safeParseDateString(date: any): string {
+  if (!date) return new Date().toISOString().split("T")[0]; // Fallback to today
+
+  // If already a string, validate and return
+  if (typeof date === "string") {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return date; // Already YYYY-MM-DD format
+    }
+    // Try to parse other formats
+    try {
+      const parsed = new Date(date);
+      if (isNaN(parsed.getTime())) return new Date().toISOString().split("T")[0];
+      return parsed.toISOString().split("T")[0];
+    } catch {
+      return new Date().toISOString().split("T")[0];
+    }
+  }
+
+  // If it's a date object or timestamp
+  try {
+    const dateObj = new Date(date);
+    if (isNaN(dateObj.getTime())) return new Date().toISOString().split("T")[0];
+    return dateObj.toISOString().split("T")[0];
+  } catch {
+    return new Date().toISOString().split("T")[0];
+  }
+}
+
 export default function ChartsPage() {
   const [symbol, setSymbol] = useState("RELIANCE");
   const [searchInput, setSearchInput] = useState("RELIANCE");
@@ -31,28 +60,27 @@ export default function ChartsPage() {
 
   if (data?.chart_data) {
     chartData = data.chart_data.map((d: any) => {
-      // Convert date string (YYYY-MM-DD) to lightweight-charts format
-      const dateStr = typeof d.date === "string" ? d.date : new Date(d.date).toISOString().split("T")[0];
+      const dateStr = safeParseDateString(d.date);
       const [year, month, day] = dateStr.split("-").map(Number);
 
       return {
         time: { year, month, day },
-        open: parseFloat(d.open),
-        high: parseFloat(d.high),
-        low: parseFloat(d.low),
-        close: parseFloat(d.close),
+        open: parseFloat(d.open) || 0,
+        high: parseFloat(d.high) || 0,
+        low: parseFloat(d.low) || 0,
+        close: parseFloat(d.close) || 0,
       };
     });
 
     volumeData = data.chart_data.map((d: any) => {
-      const dateStr = typeof d.date === "string" ? d.date : new Date(d.date).toISOString().split("T")[0];
+      const dateStr = safeParseDateString(d.date);
       const [year, month, day] = dateStr.split("-").map(Number);
 
       return {
         time: { year, month, day },
-        value: parseFloat(d.volume),
+        value: parseFloat(d.volume) || 0,
         color:
-          d.close >= d.open
+          (parseFloat(d.close) || 0) >= (parseFloat(d.open) || 0)
             ? "rgba(38, 166, 154, 0.5)"
             : "rgba(239, 83, 80, 0.5)",
       };
@@ -60,7 +88,7 @@ export default function ChartsPage() {
 
     if (data.patterns) {
       patternMarkers = data.patterns.map((p: any) => {
-        const dateStr = typeof p.date === "string" ? p.date : new Date(p.date).toISOString().split("T")[0];
+        const dateStr = safeParseDateString(p.date);
         const [year, month, day] = dateStr.split("-").map(Number);
         const isBullish = Boolean(p.is_bullish);
 
