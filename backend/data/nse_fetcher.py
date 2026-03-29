@@ -50,11 +50,30 @@ def _normalize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
     Normalize Bhavcopy DataFrame columns from either old or new UDiFF format.
     Returns standardized columns: symbol, open, high, low, close, volume, date
     """
+    logger.info("Normalizing Bhavcopy", original_columns=list(df.columns)[:20], rows=len(df))
+
     # Don't uppercase yet - check original case first for UDiFF detection
     orig_cols = set(df.columns)
+    orig_cols_lower = {c.lower() for c in df.columns}
 
-    # Detect format by checking for specific UDiFF column names (case-sensitive)
-    is_udiff_format = any(col in orig_cols for col in ["TckrSymb", "OpnPric", "ClsPric", "TradDt"])
+    # Detect format by checking for specific UDiFF column names (case-insensitive this time)
+    is_udiff_format = any(col.lower() in orig_cols_lower for col in [
+        "TckrSymb", "OpnPric", "ClsPric", "TradDt",  # Expected UDiFF
+        "SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE"     # Check if old format first
+    ])
+
+    # More robust detection: if it has lowercase 3-letter codes, it's UDiFF
+    has_3letter_codes = any(len(col) == 3 or "Pric" in col or "Symb" in col for col in orig_cols)
+
+    # OLD format detection: if it has TOTTRDQTY or TIMESTAMP, it's definitely old
+    has_old_columns = any(col in orig_cols for col in ["TOTTRDQTY", "TIMESTAMP", "SERIES"])
+
+    if has_old_columns:
+        is_udiff_format = False
+    elif has_3letter_codes and not has_old_columns:
+        is_udiff_format = True
+
+    logger.info("Format detection", is_udiff=is_udiff_format, has_3letter=has_3letter_codes, has_old=has_old_columns)
 
     if is_udiff_format:
         # NEW UDiFF FORMAT (July 8, 2024+)
@@ -63,28 +82,42 @@ def _normalize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
             df = df[df["SctySrs"] == "EQ"].copy()
             logger.info("Filtered Bhavcopy for equities only", rows_after_filter=len(df))
 
-        # Map UDiFF column names to standard format
-        udiff_mapping = {
-            "TckrSymb": "symbol",
-            "OpnPric": "open",
-            "HghPric": "high",
-            "LwPric": "low",
-            "ClsPric": "close",
-            "TtlTrdVol": "volume",
-            "TradDt": "date",
+        # Normalize column names for UDiFF: try exact match first, then case-insensitive
+        col_mapping = {}
+        col_names_lower = {c.lower(): c for c in df.columns}  # Map lowercase to original
+
+        # Define all possible column name mappings
+        target_fields = {
+            "symbol": ["TckrSymb", "TCKLRSYMB", "TickerSymbol"],
+            "open": ["OpnPric", "OpenPrice", "OPENPRICE"],
+            "high": ["HghPric", "HighPrice", "HIGHPRICE"],
+            "low": ["LwPric", "LowPrice", "LOWPRICE"],
+            "close": ["ClsPric", "ClosePrice", "CLOSEPRICE"],
+            "volume": ["TtlTrdVol", "TotalVolume", "TOTALVOLUME"],
+            "date": ["TradDt", "TradeDate", "TRADEDATE"],
         }
 
-        df = df.rename(columns=udiff_mapping, errors="ignore")
-
-        # Parse UDiFF date format (typically DD-MMM-YYYY or DDMMMYYYY)
-        if "date" in df.columns and df["date"].dtype == "object":
-            # Try multiple date formats
-            for fmt in ["%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d%b%Y"]:
-                df["date"] = pd.to_datetime(df["date"], format=fmt, errors="coerce")
-                if not df["date"].isna().all():
+        for target, variations in target_fields.items():
+            for var in variations:
+                if var in df.columns:
+                    col_mapping[var] = target
+                    break
+                elif var.lower() in col_names_lower:
+                    col_mapping[col_names_lower[var.lower()]] = target
                     break
 
-        logger.info("Normalized UDiFF format Bhavcopy", rows=len(df))
+        logger.info("UDiFF column mapping", mapping=col_mapping)
+        df = df.rename(columns=col_mapping, errors="ignore")
+
+        # Parse UDiFF date format
+        if "date" in df.columns and df["date"].dtype == "object":
+            for fmt in ["%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d%b%Y", "%d%m%Y"]:
+                df["date"] = pd.to_datetime(df["date"], format=fmt, errors="coerce")
+                if not df["date"].isna().all():
+                    logger.info("Successfully parsed date format", format=fmt)
+                    break
+
+        logger.info("Normalized UDiFF format Bhavcopy", rows=len(df), cols=list(df.columns))
 
     else:
         # OLD FORMAT (Before July 8, 2024)
