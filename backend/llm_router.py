@@ -36,6 +36,7 @@ class LLMRouter:
     ) -> str:
         """
         Complete a prompt using the best available LLM.
+        Router: Gemini (free 1500/day) → Groq (fastest, free).
 
         Args:
             prompt: The user prompt / query.
@@ -48,13 +49,7 @@ class LLMRouter:
         Raises:
             RuntimeError: If all providers fail.
         """
-        # --- Try Claude first ---
-        try:
-            return await self._call_claude(prompt, system, max_tokens)
-        except Exception as e:
-            logger.warning("Claude failed, trying Gemini", error=str(e))
-
-        # --- Fallback to Gemini ---
+        # --- Try Gemini first ---
         try:
             return await self._call_gemini(prompt, system, max_tokens)
         except Exception as e:
@@ -66,7 +61,7 @@ class LLMRouter:
         except Exception as e:
             logger.error("All LLMs failed", error=str(e))
             if "not configured" in str(e):
-                return "Mock Mode (API Keys Missing): This is a placeholder AI response. Please configure your ANTHROPIC_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in the .env file to enable live ML inferences."
+                return "Mock Mode (API Keys Missing): This is a placeholder AI response. Please configure your GEMINI_API_KEY or GROQ_API_KEY in the .env file to enable live ML inferences."
             raise RuntimeError(f"All LLM providers failed. Last error: {e}")
 
     async def stream(

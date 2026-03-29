@@ -44,7 +44,7 @@ MONEYCONTROL_BASE_URL = "https://www.moneycontrol.com"
 
 # === LLM Model Names ===
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GROQ_MODEL = "llama-3.1-8b-instant"
 
 # === Nifty 50 Symbols (NSE) ===

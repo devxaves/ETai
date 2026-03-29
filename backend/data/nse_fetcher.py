@@ -21,19 +21,127 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 _fetch_semaphore = asyncio.Semaphore(10)
 
 
+def _get_bhavcopy_url(target_date: date) -> str:
+    """
+    Returns the correct NSE Bhavcopy URL based on the date.
+    NSE migrated to UDiFF format on July 8, 2024.
+    """
+    # NSE migration date to new UDiFF format
+    UDIFF_MIGRATION_DATE = date(2024, 7, 8)
+
+    if target_date >= UDIFF_MIGRATION_DATE:
+        # NEW FORMAT (July 8, 2024 onwards)
+        # Example: BhavCopy_NSE_CM_0_0_0_20251231_F_0000.csv.zip
+        yyyymmdd = target_date.strftime("%Y%m%d")
+        url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.zip"
+    else:
+        # OLD FORMAT (Before July 8, 2024)
+        # Example: cm05JUL2024bhav.csv.zip
+        year = target_date.strftime("%Y")
+        month = target_date.strftime("%b").upper()
+        date_str = target_date.strftime("%d%b%Y").upper()
+        url = f"https://nsearchives.nseindia.com/content/historical/EQUITIES/{year}/{month}/cm{date_str}bhav.csv.zip"
+
+    return url
+
+
+def _normalize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize Bhavcopy DataFrame columns from either old or new UDiFF format.
+    Returns standardized columns: symbol, open, high, low, close, volume, date
+    """
+    # Don't uppercase yet - check original case first for UDiFF detection
+    orig_cols = set(df.columns)
+
+    # Detect format by checking for specific UDiFF column names (case-sensitive)
+    is_udiff_format = any(col in orig_cols for col in ["TckrSymb", "OpnPric", "ClsPric", "TradDt"])
+
+    if is_udiff_format:
+        # NEW UDiFF FORMAT (July 8, 2024+)
+        # Filter for equities only (SctySrs == 'EQ')
+        if "SctySrs" in df.columns:
+            df = df[df["SctySrs"] == "EQ"].copy()
+            logger.info("Filtered Bhavcopy for equities only", rows_after_filter=len(df))
+
+        # Map UDiFF column names to standard format
+        udiff_mapping = {
+            "TckrSymb": "symbol",
+            "OpnPric": "open",
+            "HghPric": "high",
+            "LwPric": "low",
+            "ClsPric": "close",
+            "TtlTrdVol": "volume",
+            "TradDt": "date",
+        }
+
+        df = df.rename(columns=udiff_mapping, errors="ignore")
+
+        # Parse UDiFF date format (typically DD-MMM-YYYY or DDMMMYYYY)
+        if "date" in df.columns and df["date"].dtype == "object":
+            # Try multiple date formats
+            for fmt in ["%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d%b%Y"]:
+                df["date"] = pd.to_datetime(df["date"], format=fmt, errors="coerce")
+                if not df["date"].isna().all():
+                    break
+
+        logger.info("Normalized UDiFF format Bhavcopy", rows=len(df))
+
+    else:
+        # OLD FORMAT (Before July 8, 2024)
+        # Uppercase for case-insensitive matching on old format
+        df.columns = [c.strip().upper() for c in df.columns]
+
+        df = df.rename(columns={
+            "SYMBOL": "symbol",
+            "OPEN": "open",
+            "HIGH": "high",
+            "LOW": "low",
+            "CLOSE": "close",
+            "TOTTRDQTY": "volume",
+            "TIMESTAMP": "date",
+        }, errors="ignore")
+
+        # Parse old date format (DD-MMM-YYYY)
+        if "date" in df.columns and df["date"].dtype == "object":
+            df["date"] = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
+
+        logger.info("Normalized old format Bhavcopy", rows=len(df))
+
+    # Select only needed columns and drop nulls
+    required_cols = ["symbol", "open", "high", "low", "close", "volume", "date"]
+    available_cols = [c for c in required_cols if c in df.columns]
+
+    if not available_cols:
+        logger.error("Bhavcopy has no recognized columns", available=list(df.columns)[:10])
+        return pd.DataFrame()
+
+    df = df[available_cols].dropna(subset=["close"])
+
+    # Ensure numeric types
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Remove rows where close is 0 or NaN
+    if "close" in df.columns:
+        df = df[df["close"].notna()]
+        df = df[df["close"] > 0]
+
+    return df
+
+
 async def download_bhavcopy(trade_date: date) -> pd.DataFrame:
     """
     Download and parse NSE Bhavcopy CSV for a given trading date.
+    Supports both old (pre-July 2024) and new UDiFF (post-July 2024) formats.
+    Automatically retries with previous trading days if current date not found.
+
     Args:
         trade_date: The trading date to fetch data for.
     Returns:
         DataFrame with columns: symbol, open, high, low, close, volume, date
     """
-    date_str = trade_date.strftime("%d%b%Y").upper()
-    year = trade_date.strftime("%Y")
-    month = trade_date.strftime("%b").upper()
-
-    url = f"https://archives.nseindia.com/content/historical/EQUITIES/{year}/{month}/cm{date_str}bhav.csv.zip"
+    url = _get_bhavcopy_url(trade_date)
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -54,42 +162,32 @@ async def download_bhavcopy(trade_date: date) -> pd.DataFrame:
                 with zf.open(csv_name) as f:
                     df = pd.read_csv(f)
 
-            # Normalize columns
-            df.columns = [c.strip().upper() for c in df.columns]
-            df = df.rename(columns={
-                "SYMBOL": "symbol",
-                "OPEN": "open",
-                "HIGH": "high",
-                "LOW": "low",
-                "CLOSE": "close",
-                "TOTTRDQTY": "volume",
-                "TIMESTAMP": "date",
-            })
+            # Normalize columns from either format
+            df = _normalize_bhavcopy_columns(df)
 
-            df["date"] = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
-            df = df[["symbol", "open", "high", "low", "close", "volume", "date"]].dropna(subset=["close"])
-            logger.info("Bhavcopy downloaded", date=str(trade_date), rows=len(df))
+            logger.info("Bhavcopy downloaded", date=str(trade_date), rows=len(df), url=url)
             return df
 
         except Exception as e:
             wait = 2 ** attempt
-            logger.warning("Bhavcopy download failed", attempt=attempt + 1, error=str(e), url=url)
+            logger.warning("Bhavcopy download failed", attempt=attempt + 1, error=str(e)[:80], date=str(trade_date))
             if attempt < 2:
                 await asyncio.sleep(wait)
 
-    logger.error("Bhavcopy download failed after 3 attempts", date=str(trade_date))
-    
-    # NEW: Recursive fallback to previous weekday if today fails (common on NSE)
-    # The current local time is Friday 04:18 AM IST, so today's file doesn't exist yet.
-    if trade_date >= date.today() - timedelta(days=2):
-        prev_date = trade_date - timedelta(days=1)
-        # Skip weekends
-        while prev_date.weekday() >= 5:
-            prev_date -= timedelta(days=1)
-        logger.info("Retrying with previous trading date", date=str(prev_date))
-        return await download_bhavcopy(prev_date)
+    logger.warning("Bhavcopy not found for date", date=str(trade_date), trying_previous_dates=True)
 
-    return pd.DataFrame()
+    # Recursive fallback: try previous trading day (skip weekends)
+    prev_date = trade_date - timedelta(days=1)
+    while prev_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        prev_date -= timedelta(days=1)
+
+    # Stop if we go back more than 7 days
+    if (trade_date - prev_date).days > 7:
+        logger.error("Bhavcopy exhausted all retries", original_date=str(trade_date))
+        return pd.DataFrame()
+
+    logger.info("Retrying with previous trading date", prev_date=str(prev_date))
+    return await download_bhavcopy(prev_date)
 
 
 async def get_historical_ohlcv(symbol: str, days: int = 365) -> pd.DataFrame:

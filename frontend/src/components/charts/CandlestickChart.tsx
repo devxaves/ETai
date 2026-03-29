@@ -25,73 +25,84 @@ export default function CandlestickChart({ data, volumeData, patterns, height = 
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: "#0a0a0a" },
-        textColor: "#888888",
-      },
-      grid: {
-        vertLines: { color: "#2a2a2a" },
-        horzLines: { color: "#2a2a2a" },
-      },
-      width: chartContainerRef.current.clientWidth,
-      height: height,
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: "#2a2a2a",
-      },
-      rightPriceScale: {
-        borderColor: "#2a2a2a",
-      },
-      crosshair: {
-        mode: 0,
-        vertLine: { width: 1, color: "#444", style: 3 },
-        horzLine: { width: 1, color: "#444", style: 3 },
-      },
-    });
-
-    const mainSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#26a69a",
-      downColor: "#ef5350",
-      borderVisible: false,
-      wickUpColor: "#26a69a",
-      wickDownColor: "#ef5350",
-    });
-
-    if (data.length > 0) {
-      mainSeries.setData(data);
+    // Guard: Don't render if no data or data is invalid
+    if (!data || data.length === 0) {
+      console.warn("CandlestickChart: No data provided");
+      return;
     }
 
-    if (patterns && patterns.length > 0) {
-      createSeriesMarkers(mainSeries, patterns as any);
-    }
-
-    if (volumeData && volumeData.length > 0) {
-      const volumeSeries = chart.addSeries(HistogramSeries, {
-        color: "#26a69a",
-        priceFormat: { type: "volume" },
-        priceScaleId: "", // set as an overlay by setting a blank priceScaleId
+    try {
+      const chart = createChart(chartContainerRef.current, {
+        layout: {
+          background: { type: ColorType.Solid, color: "#0a0a0a" },
+          textColor: "#888888",
+        },
+        grid: {
+          vertLines: { color: "#2a2a2a" },
+          horzLines: { color: "#2a2a2a" },
+        },
+        width: chartContainerRef.current.clientWidth,
+        height: height,
+        timeScale: {
+          timeVisible: true,
+          secondsVisible: false,
+          borderColor: "#2a2a2a",
+        },
+        rightPriceScale: {
+          borderColor: "#2a2a2a",
+        },
+        crosshair: {
+          mode: 0,
+          vertLine: { width: 1, color: "#444", style: 3 },
+          horzLine: { width: 1, color: "#444", style: 3 },
+        },
       });
-      volumeSeries.priceScale().applyOptions({
-        scaleMargins: { top: 0.8, bottom: 0 },
+
+      const mainSeries = chart.addSeries(CandlestickSeries, {
+        upColor: "#26a69a",
+        downColor: "#ef5350",
+        borderVisible: false,
+        wickUpColor: "#26a69a",
+        wickDownColor: "#ef5350",
       });
-      volumeSeries.setData(volumeData);
+
+      if (mainSeries && data.length > 0) {
+        mainSeries.setData(data);
+      }
+
+      if (patterns && patterns.length > 0 && mainSeries) {
+        createSeriesMarkers(mainSeries, patterns as any);
+      }
+
+      if (volumeData && volumeData.length > 0) {
+        const volumeSeries = chart.addSeries(HistogramSeries, {
+          color: "#26a69a",
+          priceFormat: { type: "volume" },
+          priceScaleId: "",
+        });
+        volumeSeries.priceScale().applyOptions({
+          scaleMargins: { top: 0.8, bottom: 0 },
+        });
+        volumeSeries.setData(volumeData);
+      }
+
+      chart.timeScale().fitContent();
+      setChartReady(true);
+
+      const handleResize = () => {
+        chart.applyOptions({ width: chartContainerRef.current?.clientWidth || 0 });
+      };
+
+      window.addEventListener("resize", handleResize);
+
+      return () => {
+        window.removeEventListener("resize", handleResize);
+        chart.remove();
+      };
+    } catch (error) {
+      console.error("CandlestickChart error:", error);
+      setChartReady(true);
     }
-
-    chart.timeScale().fitContent();
-    setChartReady(true);
-
-    const handleResize = () => {
-      chart.applyOptions({ width: chartContainerRef.current?.clientWidth || 0 });
-    };
-
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      chart.remove();
-    };
   }, [data, volumeData, patterns, height]);
 
   return (

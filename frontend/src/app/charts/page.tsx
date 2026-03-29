@@ -30,28 +30,42 @@ export default function ChartsPage() {
   let patternMarkers = [];
 
   if (data?.chart_data) {
-    chartData = data.chart_data.map((d: any) => ({
-      time: d.date,
-      open: d.open,
-      high: d.high,
-      low: d.low,
-      close: d.close,
-    }));
+    chartData = data.chart_data.map((d: any) => {
+      // Convert date string (YYYY-MM-DD) to lightweight-charts format
+      const dateStr = typeof d.date === "string" ? d.date : new Date(d.date).toISOString().split("T")[0];
+      const [year, month, day] = dateStr.split("-").map(Number);
 
-    volumeData = data.chart_data.map((d: any) => ({
-      time: d.date,
-      value: d.volume,
-      color:
-        d.close >= d.open
-          ? "rgba(38, 166, 154, 0.5)"
-          : "rgba(239, 83, 80, 0.5)",
-    }));
+      return {
+        time: { year, month, day },
+        open: parseFloat(d.open),
+        high: parseFloat(d.high),
+        low: parseFloat(d.low),
+        close: parseFloat(d.close),
+      };
+    });
+
+    volumeData = data.chart_data.map((d: any) => {
+      const dateStr = typeof d.date === "string" ? d.date : new Date(d.date).toISOString().split("T")[0];
+      const [year, month, day] = dateStr.split("-").map(Number);
+
+      return {
+        time: { year, month, day },
+        value: parseFloat(d.volume),
+        color:
+          d.close >= d.open
+            ? "rgba(38, 166, 154, 0.5)"
+            : "rgba(239, 83, 80, 0.5)",
+      };
+    });
 
     if (data.patterns) {
       patternMarkers = data.patterns.map((p: any) => {
+        const dateStr = typeof p.date === "string" ? p.date : new Date(p.date).toISOString().split("T")[0];
+        const [year, month, day] = dateStr.split("-").map(Number);
         const isBullish = Boolean(p.is_bullish);
+
         return {
-          time: p.date,
+          time: { year, month, day },
           position: isBullish ? "belowBar" : "aboveBar",
           color: isBullish ? "#26a69a" : "#ef5350",
           shape: isBullish ? "arrowUp" : "arrowDown",
